@@ -1,0 +1,334 @@
+//! Hybrid retrieval: BM25 + vector ranks fused with RRF.
+//!
+//! Falls back to lexical-only when no vector store exists yet.
+
+use std::path::{Path, PathBuf};
+
+use crate::{
+    Error,
+    embed::{EmbedProvider, Rerank},
+    index, vectors,
+};
+
+/// RRF smoothing constant.
+const RRF_K: f64 = 60.0;
+/// Lexical terms weigh double: exact matches outrank fuzzy ones, while
+/// vector-only discovery still surfaces when lexical misses entirely.
+const LEXICAL_WEIGHT: f64 = 2.0;
+/// Fused candidates rescored by the reranker.
+const RERANK_DEPTH: usize = 20;
+
+/// One fused hit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FusedHit {
+    /// Absolute file path.
+    pub path: PathBuf,
+    /// 1-based first line.
+    pub start: u64,
+    /// 1-based last line (inclusive).
+    pub end: u64,
+    /// Symbol path or heading stack.
+    pub breadcrumb: String,
+    /// Chunk text.
+    pub text: String,
+    /// Fused RRF score.
+    pub score: f64,
+    /// 1-based lexical rank, when present.
+    pub lexical_rank: Option<usize>,
+    /// 1-based vector rank, when present.
+    pub vector_rank: Option<usize>,
+}
+
+fn chunk_key(path: &Path, start: u64, end: u64, breadcrumb: &str) -> String {
+    format!("{}:{start}-{end}:{breadcrumb}", path.display())
+}
+
+/// Fuse two rank lists with reciprocal rank fusion, optionally rescored
+/// by a cross-encoder reranker over the top candidates.
+///
+/// # Errors
+///
+/// Returns [`Error`] when lexical search fails or the query cannot be
+/// embedded.
+pub fn hybrid(
+    workspace: &Path,
+    query: &str,
+    limit: usize,
+    provider: Option<&dyn EmbedProvider>,
+    reranker: Option<&dyn Rerank>,
+) -> Result<Vec<FusedHit>, Error> {
+    let fetch = (limit * 10).max(50);
+    let lexical = index::search(workspace, query, fetch)?;
+
+    let mut vector_ranks: Vec<(String, index::RankedHit)> = Vec::new();
+    if let Some(provider) = provider {
+        // Skip vectors when the provider does not match the store, instead
+        // of scoring against truncated dimensions.
+        let dims_ok = vectors::store_dims(workspace)
+            .map(|dims| dims.is_none_or(|d| d == provider.dims()))
+            .unwrap_or(true);
+        if dims_ok {
+            let items = vectors::load_items(workspace)?;
+            if !items.is_empty() {
+                let query_text = match provider.query_prefix() {
+                    Some(prefix) => format!("{prefix}{query}"),
+                    None => query.to_owned(),
+                };
+                let query_vec = provider
+                    .embed(&[query_text.as_str()])?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        Error::Embed("provider returned no vector for query".to_owned())
+                    })?;
+                let norm: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let query_vec: Vec<f32> = if norm > 0.0 {
+                    query_vec.iter().map(|x| x / norm).collect()
+                } else {
+                    query_vec
+                };
+                let refs: Vec<&vectors::VectorItem> = items.iter().collect();
+                let ranked = vectors::topk(&refs, &query_vec, fetch);
+                for (i, _) in ranked.iter().enumerate() {
+                    let item = refs[ranked[i].0];
+                    vector_ranks.push((
+                        chunk_key(
+                            &workspace.join(&item.rel),
+                            item.start,
+                            item.end,
+                            &item.breadcrumb,
+                        ),
+                        index::RankedHit {
+                            path: workspace.join(&item.rel),
+                            start: item.start,
+                            end: item.end,
+                            breadcrumb: item.breadcrumb.clone(),
+                            text: item.text.clone(),
+                            score: 0.0,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut fused: Vec<FusedHit> = Vec::new();
+    let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut upsert = |key: String,
+                      hit: &index::RankedHit,
+                      term: f64,
+                      lexical_rank: Option<usize>,
+                      vector_rank: Option<usize>| {
+        if let Some(&i) = by_key.get(&key) {
+            let slot = &mut fused[i];
+            slot.score += term;
+            if slot.lexical_rank.is_none() {
+                slot.lexical_rank = lexical_rank;
+            }
+            if slot.vector_rank.is_none() {
+                slot.vector_rank = vector_rank;
+            }
+            return;
+        }
+        by_key.insert(key, fused.len());
+        fused.push(FusedHit {
+            path: hit.path.clone(),
+            start: hit.start,
+            end: hit.end,
+            breadcrumb: hit.breadcrumb.clone(),
+            text: hit.text.clone(),
+            score: term,
+            lexical_rank,
+            vector_rank,
+        });
+    };
+
+    for (i, hit) in lexical.iter().enumerate() {
+        let key = chunk_key(&hit.path, hit.start, hit.end, &hit.breadcrumb);
+        upsert(
+            key,
+            hit,
+            LEXICAL_WEIGHT * rrf(Some(i + 1)),
+            Some(i + 1),
+            None,
+        );
+    }
+    // Vector windows are tighter than lexical chunks, so keys rarely match.
+    // Credit one vector term per slot to the most-overlapping lexical chunk
+    // in the same file (extra overlapping windows are redundant votes, not
+    // independent evidence); vector-only regions become their own entries.
+    for (i, (_, hit)) in vector_ranks.iter().enumerate() {
+        let slot = fused
+            .iter_mut()
+            .filter(|s| s.path == hit.path && s.vector_rank.is_none())
+            .max_by_key(|s| overlap(s.start, s.end, hit.start, hit.end));
+        if let Some(slot) = slot {
+            if overlap(slot.start, slot.end, hit.start, hit.end) > 0 {
+                slot.score += rrf(Some(i + 1));
+                slot.vector_rank = Some(i + 1);
+                continue;
+            }
+        }
+        fused.push(FusedHit {
+            path: hit.path.clone(),
+            start: hit.start,
+            end: hit.end,
+            breadcrumb: hit.breadcrumb.clone(),
+            text: hit.text.clone(),
+            score: rrf(Some(i + 1)),
+            lexical_rank: None,
+            vector_rank: Some(i + 1),
+        });
+    }
+
+    // Exact beats fuzzy on ties: lexical rank first, then vector rank.
+    fused.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| cmp_rank(a.lexical_rank, b.lexical_rank))
+            .then_with(|| cmp_rank(a.vector_rank, b.vector_rank))
+    });
+
+    if let Some(reranker) = reranker {
+        rerank_top(query, &mut fused, reranker)?;
+    }
+    fused.truncate(limit);
+    Ok(fused)
+}
+
+/// Rescore the top candidates with a cross-encoder; unranked tails keep
+/// fused order behind rescored heads.
+fn rerank_top(query: &str, fused: &mut Vec<FusedHit>, reranker: &dyn Rerank) -> Result<(), Error> {
+    let depth = fused.len().min(RERANK_DEPTH);
+    if depth == 0 {
+        return Ok(());
+    }
+    let docs: Vec<String> = fused[..depth]
+        .iter()
+        .map(|h| format!("{} {}", h.breadcrumb, truncate_doc(&h.text)))
+        .collect();
+    let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+    // Already best-first from the reranker.
+    let order: Vec<(usize, f32)> = reranker.rerank(query, &refs)?;
+    let mut rescored: Vec<FusedHit> = Vec::with_capacity(fused.len());
+    for (orig, score) in &order {
+        let mut hit = fused[*orig].clone();
+        hit.score = f64::from(*score);
+        rescored.push(hit);
+    }
+    // Any candidate the reranker dropped keeps fused order at the tail.
+    let seen: std::collections::HashSet<usize> = order.iter().map(|(i, _)| *i).collect();
+    for (i, hit) in fused.iter().enumerate() {
+        if !seen.contains(&i) && rescored.len() < fused.len() {
+            rescored.push(hit.clone());
+        }
+    }
+    *fused = rescored;
+    Ok(())
+}
+
+fn truncate_doc(text: &str) -> &str {
+    const CAP: usize = 1000;
+    if text.len() <= CAP {
+        return text;
+    }
+    let mut end = CAP;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn cmp_rank(a: Option<usize>, b: Option<usize>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn rrf(rank: Option<usize>) -> f64 {
+    rank.map_or(0.0, |r| 1.0 / (RRF_K + r as f64))
+}
+
+/// Inclusive line overlap of two ranges.
+fn overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> u64 {
+    (a_end.min(b_end) + 1).saturating_sub(a_start.max(b_start))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vectors::tests::TestProvider;
+
+    fn workspace_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (name, contents) in files {
+            std::fs::write(dir.path().join(name), contents).expect("write");
+        }
+        dir
+    }
+
+    #[test]
+    fn hybrid_without_provider_is_lexical_only() {
+        let dir = workspace_with(&[("a.txt", "supersonic_ferret zoology\n")]);
+        index::sync(dir.path()).expect("sync");
+        let hits = hybrid(dir.path(), "supersonic_ferret", 10, None, None).expect("hybrid");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].lexical_rank, Some(1));
+        assert_eq!(hits[0].vector_rank, None);
+    }
+
+    #[test]
+    fn hybrid_fuses_both_ranks() {
+        let dir = workspace_with(&[("a.txt", "supersonic_ferret zoology\n")]);
+        index::sync(dir.path()).expect("sync");
+        vectors::sync(dir.path(), &TestProvider).expect("vectors");
+        let hits = hybrid(
+            dir.path(),
+            "supersonic_ferret",
+            10,
+            Some(&TestProvider),
+            None,
+        )
+        .expect("hybrid");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].lexical_rank, Some(1));
+        assert_eq!(hits[0].vector_rank, Some(1));
+        // Present in both lists: weighted sum of both RRF terms.
+        let expected = 2.0 / 61.0 + 1.0 / 61.0;
+        assert!((hits[0].score - expected).abs() < 1e-9);
+    }
+
+    /// Mock reranker: reverses candidate order with descending scores.
+    struct ReverseReranker;
+
+    impl crate::embed::Rerank for ReverseReranker {
+        fn rerank(&self, _query: &str, docs: &[&str]) -> Result<Vec<(usize, f32)>, Error> {
+            Ok((0..docs.len()).rev().map(|i| (i, i as f32)).collect())
+        }
+    }
+
+    #[test]
+    fn reranker_reorders_and_limits() {
+        let dir = workspace_with(&[
+            ("a.txt", "supersonic_ferret zoology\n"),
+            ("b.txt", "supersonic_ferret safari\n"),
+        ]);
+        index::sync(dir.path()).expect("sync");
+        let plain = hybrid(dir.path(), "supersonic_ferret", 2, None, None).expect("hybrid");
+        assert_eq!(plain.len(), 2);
+        let hits = hybrid(
+            dir.path(),
+            "supersonic_ferret",
+            1,
+            None,
+            Some(&ReverseReranker),
+        )
+        .expect("hybrid");
+        assert_eq!(hits.len(), 1);
+        // Reversed: the reranked head is the plain tail.
+        assert_eq!(hits[0].path, plain[1].path);
+    }
+}

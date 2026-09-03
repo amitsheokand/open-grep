@@ -1,0 +1,54 @@
+[package]
+name = "one-grep"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Local-first hybrid workspace search (Rust port of zvec-grep concept)"
+license = "Apache-2.0"
+
+[lib]
+name = "one_grep"
+path = "src/lib.rs"
+
+[[bin]]
+name = "one-grep"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8.9"
+clap = { version = "4", features = ["derive"] }
+fastembed = "6.0.2"
+grep = "0.4.1"
+ignore = "0.4.30"
+notify = "8.2.0"
+rand = "0.10.2"
+reqwest = { version = "0.13.4", features = ["blocking", "json"] }
+rmcp = { version = "2.2.0", features = ["server", "transport-io", "transport-streamable-http-server", "schemars"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tantivy = "0.25.0"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tree-sitter = "0.26.13"
+tree-sitter-nix = "0.3.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+style = "warn"
+complexity = "warn"
+perf = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,5 @@
+/target
+/.one-grep/
+.DS_Store
+# Upstream skill clone (nested git); see .opencode/skills/router (ours).
+.opencode/skills/rust-skills/
