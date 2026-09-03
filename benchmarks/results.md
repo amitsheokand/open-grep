@@ -191,7 +191,15 @@ no overfit signal. Chain queries hit via `calls` breadcrumbs live
   Next: Phase B fine-tune (sentence-transformers, MNR loss, ONNX
   export via existing user-defined path).
 
-## Run 9 — Phase B: fine-tuned MiniLM (2026-09-02)
+## Run 10 — Phase B at volume: 1111 triples (2026-09-02)
+
+Added tokio (325) + windows-rs (600, 607k-chunk pool) + fresh nixos
+(186, self-contained pos_text). 889 train / 223 held. Same recipe.
+
+Pure-vector held (17k capped pool): base 0.37/0.52/0.66 →
+**ft2 0.52/0.67/0.78** (+15pp R@1/R@3, ±3pp noise → conclusive).
+Exported single-file 87 MB ONNX; `embed --model` verified live.
+Lesson: volume + hard negatives beat model size; MiniLM stays.
 
 148 train / 38 held triples. MNRL, 10 epochs, 35 s on M4 CPU.
 Manual torch.onnx export (optimum/transformers clash) merged to

@@ -17,7 +17,8 @@ from torch.utils.data import DataLoader
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--triples", required=True)
+    ap.add_argument("--triples", required=True, nargs="+",
+                    help="one or more triples jsonl files (concatenated)")
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--epochs", type=int, default=10)
@@ -36,7 +37,9 @@ def main():
             c = json.loads(line)
             texts[(c["path"], c["start"], c["end"])] = c["text"][:1500]
 
-    rows = [json.loads(l) for l in open(args.triples) if l.strip()]
+    rows = []
+    for t in args.triples:
+        rows += [json.loads(l) for l in open(t) if l.strip()]
     random.shuffle(rows)
     cut = int(len(rows) * 0.8)
     train_rows, held_rows = rows[:cut], rows[cut:]
@@ -45,6 +48,9 @@ def main():
     json.dump(held_rows, open(args.out + ".held.json", "w"))
 
     def to_example(r):
+        # Self-contained triples carry text; else join via workspace dump.
+        if "pos_text" in r:
+            return (r["query"], r["pos_text"][:1500])
         pos = texts.get((r["pos"]["path"], r["pos"]["start"], r["pos"]["end"]))
         return (r["query"], pos) if pos else None
 

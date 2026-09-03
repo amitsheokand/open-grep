@@ -115,6 +115,7 @@ def main():
             f.write(json.dumps({
                 "query": q,
                 "pos": {"path": c["path"], "start": c["start"], "end": c["end"]},
+                "pos_text": c["text"][:1500],
                 "negs": negs,
             }) + "\n")
             kept += 1
