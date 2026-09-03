@@ -190,6 +190,18 @@ no overfit signal. Chain queries hit via `calls` breadcrumbs live
   R@3 0.71, R@10 0.86 — real headroom, valid train+eval set.
   Next: Phase B fine-tune (sentence-transformers, MNR loss, ONNX
   export via existing user-defined path).
+
+## Run 9 — Phase B: fine-tuned MiniLM (2026-09-02)
+
+148 train / 38 held triples. MNRL, 10 epochs, 35 s on M4 CPU.
+Manual torch.onnx export (optimum/transformers clash) merged to
+single-file 87 MB ONNX; `embed --model <dir>` via
+`try_new_from_user_defined` (mean pooling, dims auto-probed).
+
+Pure-vector held: base R@3 0.58 → custom **0.71** (+13pp).
+Hybrid held: base 0.42/0.63/0.82 → custom **0.45/0.68/0.82**.
+Direction consistent, n=38 noisy (±8pp). Next: scale pairs with
+windows-rs + big Rust crates before claiming the win.
 - Training corpora beyond nixos/hipfire: windows-rs + other big Rust
   crates (symbol-dense, Apache/MIT) for pair mining volume.
 

@@ -1,5 +1,7 @@
 /target
 /.one-grep/
 .DS_Store
+# Trained/exported model binaries (90MB+); scripts stay tracked.
+benchmarks/models/
 # Upstream skill clone (nested git); see .opencode/skills/router (ours).
 .opencode/skills/rust-skills/

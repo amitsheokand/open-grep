@@ -40,7 +40,7 @@ pub struct FastembedProvider {
 }
 
 /// Selectable ONNX embedding model. Ordered by quality/cost trade-off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum OnnxModel {
     /// `all-MiniLM-L6-v2`, 22M params, 384 dims. Fastest, weakest.
     #[default]
@@ -51,18 +51,22 @@ pub enum OnnxModel {
     /// `embeddinggemma-300m`, 300M params, 768 dims. Best retrieval
     /// under 500M params, slowest CPU per-query. Gemma license.
     Gemma300M,
+    /// Bring-your-own directory: `model.onnx` (+`.onnx.data`), tokenizer
+    /// files, mean pooling. From `embed --model <dir>`.
+    Custom(std::path::PathBuf),
 }
 
 impl OnnxModel {
-    fn embedding_model(self) -> fastembed::EmbeddingModel {
+    fn embedding_model(self: &OnnxModel) -> Option<fastembed::EmbeddingModel> {
         match self {
-            Self::MiniLM => fastembed::EmbeddingModel::AllMiniLML6V2,
-            Self::ArcticM => fastembed::EmbeddingModel::SnowflakeArcticEmbedM,
-            Self::Gemma300M => fastembed::EmbeddingModel::EmbeddingGemma300M,
+            Self::MiniLM => Some(fastembed::EmbeddingModel::AllMiniLML6V2),
+            Self::ArcticM => Some(fastembed::EmbeddingModel::SnowflakeArcticEmbedM),
+            Self::Gemma300M => Some(fastembed::EmbeddingModel::EmbeddingGemma300M),
+            Self::Custom(_) => None,
         }
     }
 
-    /// Parse a CLI label.
+    /// Parse a CLI label or model directory.
     ///
     /// # Errors
     ///
@@ -72,9 +76,16 @@ impl OnnxModel {
             "minilm" => Ok(Self::MiniLM),
             "arctic-m" => Ok(Self::ArcticM),
             "gemma-300m" => Ok(Self::Gemma300M),
-            other => Err(Error::InvalidInput(format!(
-                "unknown embedding model: {other} (minilm|arctic-m|gemma-300m)"
-            ))),
+            other => {
+                let dir = std::path::PathBuf::from(other);
+                if dir.join("model.onnx").is_file() {
+                    Ok(Self::Custom(dir))
+                } else {
+                    Err(Error::InvalidInput(format!(
+                        "unknown embedding model: {other} (minilm|arctic-m|gemma-300m|<dir>)"
+                    )))
+                }
+            }
         }
     }
 
@@ -88,9 +99,23 @@ impl OnnxModel {
             "fastembed/all-MiniLM-L6-v2" => Ok(Self::MiniLM),
             "fastembed/snowflake-arctic-embed-m" => Ok(Self::ArcticM),
             "fastembed/embeddinggemma-300m" => Ok(Self::Gemma300M),
-            other => Err(Error::Embed(format!(
-                "vector store uses unknown model {other}; re-run `embed`"
-            ))),
+            custom => custom
+                .strip_prefix("user:")
+                .map(|d| Self::Custom(std::path::PathBuf::from(d)))
+                .ok_or_else(|| {
+                    Error::Embed(format!(
+                        "vector store uses unknown model {name}; re-run `embed`"
+                    ))
+                }),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::MiniLM => "fastembed/all-MiniLM-L6-v2".to_owned(),
+            Self::ArcticM => "fastembed/snowflake-arctic-embed-m".to_owned(),
+            Self::Gemma300M => "fastembed/embeddinggemma-300m".to_owned(),
+            Self::Custom(dir) => format!("user:{}", dir.display()),
         }
     }
 }
@@ -111,9 +136,14 @@ impl FastembedProvider {
     ///
     /// Returns [`Error::Embed`] when the model cannot be fetched or started.
     pub fn load_model(which: OnnxModel) -> Result<Self, Error> {
+        if let OnnxModel::Custom(dir) = &which {
+            return Self::load_user(dir, &which);
+        }
         let cache = global_cache_dir();
         std::fs::create_dir_all(&cache).map_err(|e| Error::Embed(e.to_string()))?;
-        let embedding_model = which.embedding_model();
+        let embedding_model = which
+            .embedding_model()
+            .ok_or_else(|| Error::Embed("custom model took the wrong path".to_owned()))?;
         let dims = fastembed::TextEmbedding::get_model_info(&embedding_model)
             .map_err(|e| Error::Embed(e.to_string()))?
             .dim;
@@ -125,18 +155,46 @@ impl FastembedProvider {
         .map_err(|e| Error::Embed(e.to_string()))?;
         Ok(Self {
             model: Mutex::new(model),
+            name: which.label(),
             which,
-            name: format!("fastembed/{}", model_label(which)),
             dims,
         })
     }
-}
 
-fn model_label(which: OnnxModel) -> &'static str {
-    match which {
-        OnnxModel::MiniLM => "all-MiniLM-L6-v2",
-        OnnxModel::ArcticM => "snowflake-arctic-embed-m",
-        OnnxModel::Gemma300M => "embeddinggemma-300m",
+    /// Load a bring-your-own ONNX directory (mean pooling).
+    fn load_user(dir: &std::path::Path, which: &OnnxModel) -> Result<Self, Error> {
+        let read = |name: &str| {
+            std::fs::read(dir.join(name))
+                .map_err(|e| Error::Embed(format!("{}: {e}", dir.join(name).display())))
+        };
+        // Prefer a single-file export; fall back to model.onnx.
+        let onnx = read("model_single.onnx").or_else(|_| read("model.onnx"))?;
+        let tokenizer_files = fastembed::TokenizerFiles {
+            tokenizer_file: read("tokenizer.json")?,
+            config_file: read("config.json")?,
+            special_tokens_map_file: read("special_tokens_map.json")?,
+            tokenizer_config_file: read("tokenizer_config.json")?,
+        };
+        let mut user = fastembed::UserDefinedEmbeddingModel::new(onnx, tokenizer_files);
+        user.pooling = Some(fastembed::Pooling::Mean);
+        let mut model = fastembed::TextEmbedding::try_new_from_user_defined(
+            user,
+            fastembed::InitOptionsUserDefined::new(),
+        )
+        .map_err(|e| Error::Embed(e.to_string()))?;
+        let dims = model
+            .embed(vec!["probe"], None)
+            .map_err(|e| Error::Embed(e.to_string()))?
+            .into_iter()
+            .next()
+            .map(|v| v.len())
+            .ok_or_else(|| Error::Embed("user model returned no vector".to_owned()))?;
+        Ok(Self {
+            model: Mutex::new(model),
+            which: which.clone(),
+            name: which.label(),
+            dims,
+        })
     }
 }
 
@@ -162,7 +220,7 @@ impl EmbedProvider for FastembedProvider {
     fn query_prefix(&self) -> Option<&str> {
         match self.which {
             OnnxModel::ArcticM => Some("Represent this sentence for searching relevant passages: "),
-            OnnxModel::MiniLM | OnnxModel::Gemma300M => None,
+            OnnxModel::MiniLM | OnnxModel::Gemma300M | OnnxModel::Custom(_) => None,
         }
     }
 }
