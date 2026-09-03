@@ -154,6 +154,32 @@ Primary interfaces (hybrid/rerank, agentic) win; lex-only and rg
 remain for exact lookup. Concepts still weak everywhere (all ≤2/4) —
 needs corpus strategy beyond ranking constants; parked.
 
+## Run 8 (2026-09-02): stolen ideas — stratification, split, chains
+
+Paper transfers applied:
+
+- **Difficulty levels + dev/held split** (ICD-Bench method): queries
+  labeled L1 (exact term) / L2 (partial) / L3 (paraphrase); dev tunes,
+  held verifies. Harness `SPLIT=dev|held|all`.
+- **Call-chain chunks** (compositional primitives): tree-sitter call
+  extraction (Rust `call_expression`, Python `call`, incl. `attribute`
+  receivers), same-file-first else unique-global resolution, ambiguous
+  names skipped. Breadcrumb `caller > calls > callee`, kind `chain`,
+  shared IDs across lexical/vector stores. Index rebuilds chains on
+  any change (callee-text staleness); vectors prune via id-set.
+
+| keyword (10, +2 chain Qs) | ms | recall@3 |
+|---|---|---|
+| rg | 5.4 | 7/10 |
+| lex | 5.4 | 6/10 |
+| hybrid | 99 | 7/10 |
+| **rerank** | 602 | **10/10** |
+| zg | 251 | 8/10 |
+
+Held-out only: rerank 5/5, hybrid 4/5, zg 4/5 — tuning generalizes,
+no overfit signal. Chain queries hit via `calls` breadcrumbs live
+(`apply_request > calls > apply_lane_defaults` rank 2 pre-rerank).
+
 ## Next
 
 - Qwen3-0.6B via `try_new_from_user_defined` if quality ceiling hit.

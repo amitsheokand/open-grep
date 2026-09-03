@@ -199,6 +199,26 @@ pub fn sync(workspace: &Path) -> Result<Stats, Error> {
         stats.removed += 1;
     }
 
+    // Chain docs reference callee text, so any file change can stale them.
+    // Rebuild all chains when anything changed (noop syncs skip this).
+    if stats.upserted > 0 || stats.removed > 0 {
+        writer.delete_term(Term::from_field_text(fields.kind, "chain"));
+        let mut chains = 0;
+        for chunk in crate::chains::extract_workspace(workspace)? {
+            let rel = chunk.path.to_string_lossy().into_owned();
+            chains += 1;
+            writer.add_document(doc!(
+                fields.path => rel,
+                fields.start => chunk.start,
+                fields.end => chunk.end,
+                fields.kind => "chain",
+                fields.breadcrumb => chunk.breadcrumb,
+                fields.text => chunk.text,
+            ))?;
+        }
+        stats.chunks += chains;
+    }
+
     writer.commit()?;
     save_manifest(workspace, &manifest)?;
     Ok(stats)

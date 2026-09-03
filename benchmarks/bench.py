@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 
 MODEL = os.environ.get("MODEL", "minilm")
+# dev: tune here. held: verify here (overfit check). all: full table.
+SPLIT = os.environ.get("SPLIT", "all")
 
 ONE_GREP = Path("/Users/amitsheokand/dev/one-grep/target/release/one-grep")
 if not ONE_GREP.exists():
@@ -23,28 +25,37 @@ if not ONE_GREP.exists():
 CORPUS_SRC = Path("/Users/amitsheokand/dev/nixos-config")
 
 QUERIES = [
-    # (label, one-grep/zg query, rg pattern, expected path substring)
-    ("mlx server", "mlx language model server", "mlx-lm-server", "mlx-mac.nix"),
-    ("rust setup", "rust toolchain installation setup", "rustup", "home-manager.nix"),
-    ("launchd svc", "background service launchd agent", "launchd", "hosts/darwin/default.nix"),
-    ("compactor", "compactor model adapter fusion", "compactor", "mlx-compactor.nix"),
-    ("tmux keys", "tmux key bindings pane navigation", "select-pane", "home-manager.nix"),
-    ("font cfg", "terminal font family size", "MesloLGS", "home-manager.nix"),
-    ("ssh hosts", "ssh host configuration", "matchBlocks", "home-manager.nix"),
+    # (label, query, rg pattern, expected substring, difficulty 1-3)
+    ("mlx server", "mlx language model server", "mlx-lm-server", "mlx-mac.nix", 1),
+    ("rust setup", "rust toolchain installation setup", "rustup", "home-manager.nix", 2),
+    ("launchd svc", "background service launchd agent", "launchd",
+     "hosts/darwin/default.nix", 1),
+    ("compactor", "compactor model adapter fusion", "compactor", "mlx-compactor.nix", 1),
+    ("tmux keys", "tmux key bindings pane navigation", "select-pane", "home-manager.nix", 2),
+    ("font cfg", "terminal font family size", "MesloLGS", "home-manager.nix", 2),
+    ("ssh hosts", "ssh host configuration", "matchBlocks", "home-manager.nix", 1),
     ("stop gemma", "stop gemma lane and start compact lane", "stop gemma",
-     "mlx-lane.nix"),
+     "mlx-lane.nix", 2),
+    # Call-chain questions (chain chunks: caller > calls > callee).
+    ("chain apply", "what does apply_request call", "apply_request",
+     "hipfire-profile-proxy.py", 2),
+    ("chain callers", "which functions call apply_lane_defaults", "apply_lane_defaults",
+     "hipfire-profile-proxy.py", 2),
 ]
 
-# Paraphrased, low keyword overlap with targets.
+# Paraphrased, low keyword overlap with targets (all difficulty 3).
 CONCEPTS = [
-    ("never both", "exclusive lane, never both at once", "mlx-lane.nix"),
+    ("never both", "exclusive lane, never both at once", "mlx-lane.nix", 3),
     ("pretty prompt", "make the terminal prompt show git status with pretty colors",
-     "home-manager.nix"),
+     "home-manager.nix", 3),
     ("save session", "automatically preserve my terminal session every few minutes",
-     "home-manager.nix"),
+     "home-manager.nix", 3),
     ("no secrets", "where do I put tokens so they never get committed",
-     "home-manager.nix"),
+     "home-manager.nix", 3),
 ]
+
+# Stratified dev/held split (by index within each set).
+DEV_IDX = {"queries": {0, 1, 4, 5, 8}, "concepts": {0, 1}}
 
 
 def run(cmd, **kw):
@@ -145,14 +156,26 @@ def main():
         zg_index_s = None  # measured below on re-run is noop; skip
     results["zg_index_note"] = r.stderr[-300:] if r.returncode != 0 else "ok"
 
-    for label, query, pattern, expected in QUERIES:
+    for i, (label, query, pattern, expected, level) in enumerate(QUERIES):
+        if SPLIT == "dev" and i not in DEV_IDX["queries"]:
+            continue
+        if SPLIT == "held" and i in DEV_IDX["queries"]:
+            continue
         row = run_keyword_set(label, query, pattern, expected, ws)
+        row["level"] = level
+        row["split"] = "dev" if i in DEV_IDX["queries"] else "held"
         results["queries"].append(row)
         print(json.dumps(row), flush=True)
 
     results["concepts"] = []
-    for label, query, expected in CONCEPTS:
+    for i, (label, query, expected, level) in enumerate(CONCEPTS):
+        if SPLIT == "dev" and i not in DEV_IDX["concepts"]:
+            continue
+        if SPLIT == "held" and i in DEV_IDX["concepts"]:
+            continue
         row = run_concept_set(label, query, expected, ws)
+        row["level"] = level
+        row["split"] = "dev" if i in DEV_IDX["concepts"] else "held"
         results["concepts"].append(row)
         print(json.dumps(row), flush=True)
 
@@ -165,25 +188,39 @@ def main():
         return f"{sum(vs)}/{len(vs)}" if vs else None
 
     def table(title, rows, systems):
-        print(f"\n{title}")
+        print(f"\n{title} (split={SPLIT})")
         print("| system | mean ms | recall@3 |")
         print("|---|---|---|")
         for name, lat, rec in systems:
             print(f"| {name} | {mean(rows, lat)} | {rate(rows, rec)} |")
 
-    table("keyword set", results["queries"], [
-        ("rg -l", "rg_ms", "rg_recall3"),
-        ("one-grep lexical", "lex_ms", "lex_recall3"),
-        ("one-grep hybrid", "hyb_ms", "hyb_recall3"),
-        ("one-grep rerank", "rkh_ms", "rkh_recall3"),
-        ("zg", "zg_ms", "zg_recall3"),
-    ])
-    table("concept set", results["concepts"], [
-        ("one-grep lexical", "lex_ms", "lex_recall3"),
-        ("one-grep hybrid", "hyb_ms", "hyb_recall3"),
-        ("one-grep rerank", "rkh_ms", "rkh_recall3"),
-        ("zg", "zg_ms", "zg_recall3"),
-    ])
+    def by_level(rows):
+        out = {}
+        for q in rows:
+            out.setdefault(q.get("level", "?"), []).append(q)
+        return out
+
+    for title, rows, systems in [
+        ("keyword set", results["queries"], [
+            ("rg -l", "rg_ms", "rg_recall3"),
+            ("one-grep lexical", "lex_ms", "lex_recall3"),
+            ("one-grep hybrid", "hyb_ms", "hyb_recall3"),
+            ("one-grep rerank", "rkh_ms", "rkh_recall3"),
+            ("zg", "zg_ms", "zg_recall3"),
+        ]),
+        ("concept set", results["concepts"], [
+            ("one-grep lexical", "lex_ms", "lex_recall3"),
+            ("one-grep hybrid", "hyb_ms", "hyb_recall3"),
+            ("one-grep rerank", "rkh_ms", "rkh_recall3"),
+            ("zg", "zg_ms", "zg_recall3"),
+        ]),
+    ]:
+        table(title, rows, systems)
+        levels = by_level(rows)
+        if len(levels) > 1:
+            print(f"by difficulty: " + "; ".join(
+                f"L{lv} hybrid {rate(rs, 'hyb_recall3')}"
+                for lv, rs in sorted(levels.items(), key=lambda kv: str(kv[0]))))
     print(f"\nindex: one-grep {results['onegrep_index_s']}s, "
           f"embed {results['onegrep_embed_s']}s; zg: {results['zg_index_note']}")
     (tmp / "results.json").write_text(json.dumps(results, indent=1))

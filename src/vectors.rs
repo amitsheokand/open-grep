@@ -172,6 +172,28 @@ pub fn sync(workspace: &Path, provider: &dyn EmbedProvider) -> Result<Stats, Err
         }
     }
 
+    // Chain chunks share IDs with the lexical index (same rel/span/crumb).
+    for chunk in crate::chains::extract_workspace(workspace)? {
+        let rel = chunk.path.to_string_lossy().into_owned();
+        let id = chunk_id(&rel, chunk.start, chunk.end, &chunk.breadcrumb);
+        current_ids.insert(id.clone());
+        if store.items.contains_key(&id) || pending.iter().any(|(pid, _)| pid == &id) {
+            continue;
+        }
+        pending.push((
+            id,
+            VectorItem {
+                rel,
+                start: chunk.start,
+                end: chunk.end,
+                kind: "chain".to_owned(),
+                breadcrumb: chunk.breadcrumb,
+                text: chunk.text,
+                embedding: Vec::new(),
+            },
+        ));
+    }
+
     let mut embedded = 0;
     let total_pending = pending.len();
     let started = std::time::Instant::now();
