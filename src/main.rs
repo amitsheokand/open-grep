@@ -39,6 +39,8 @@ enum Command {
     },
     /// Watch a workspace and re-sync the index on changes.
     Watch { path: std::path::PathBuf },
+    /// Dump extracted chunks as JSONL (for mining/eval).
+    DumpChunks { path: std::path::PathBuf },
     /// Search workspace files directly (no index needed).
     Rg {
         /// Pattern to search for.
@@ -160,6 +162,36 @@ async fn main() -> Result<()> {
         }
         Command::Watch { path } => {
             one_grep::watch::run(&path)?;
+        }
+        Command::DumpChunks { path } => {
+            for entry in one_grep::engine::walker(&path).filter_map(Result::ok) {
+                let file = entry.path();
+                if !file.is_file() {
+                    continue;
+                }
+                let rel = file
+                    .strip_prefix(&path)
+                    .map_err(|_| anyhow::anyhow!("path escapes workspace: {}", file.display()))?
+                    .to_string_lossy()
+                    .into_owned();
+                for chunk in one_grep::extract::extract_file(file)? {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "path": rel,
+                            "start": chunk.start,
+                            "end": chunk.end,
+                            "kind": match chunk.kind {
+                                one_grep::extract::ChunkKind::Symbol => "symbol",
+                                one_grep::extract::ChunkKind::Section => "section",
+                                one_grep::extract::ChunkKind::Window => "window",
+                            },
+                            "breadcrumb": chunk.breadcrumb,
+                            "text": chunk.text,
+                        })
+                    );
+                }
+            }
         }
         Command::Rg {
             pattern,

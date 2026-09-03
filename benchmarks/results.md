@@ -183,6 +183,15 @@ no overfit signal. Chain queries hit via `calls` breadcrumbs live
 ## Next
 
 - Qwen3-0.6B via `try_new_from_user_defined` if quality ceiling hit.
+- Phase A pair mining (done): `dump-chunks` + `benchmarks/mine.py`
+  synthesize (query, chunk, BM25-hard-negatives) with the mlx compact
+  lane. 186 triples (md/nix/py/shell mix, avg 12-word queries, 4.6
+  negs each). Baseline MiniLM hybrid on synthetic set: R@1 0.47,
+  R@3 0.71, R@10 0.86 — real headroom, valid train+eval set.
+  Next: Phase B fine-tune (sentence-transformers, MNR loss, ONNX
+  export via existing user-defined path).
+- Training corpora beyond nixos/hipfire: windows-rs + other big Rust
+  crates (symbol-dense, Apache/MIT) for pair mining volume.
 
 ## Changelog (post-bench)
 
