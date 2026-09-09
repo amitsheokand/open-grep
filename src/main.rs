@@ -67,12 +67,12 @@ enum Command {
         #[arg(long, default_value_t = one_grep::install::DEFAULT_PORT)]
         port: u16,
     },
-    /// Register one-grep with an agent.
+    /// Register one-grep with an agent harness.
     Install {
-        /// Agent target (only `opencode` for now).
+        /// Agent target: opencode, cursor, pi, muse, hermes, command-code.
         #[arg(long, default_value = "opencode")]
         target: String,
-        /// Register the HTTP endpoint instead of stdio.
+        /// Register the HTTP endpoint instead of stdio (opencode only).
         #[arg(long)]
         http: bool,
         /// Loopback port for `--http`.
@@ -219,10 +219,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Install { target, http, port } => {
-            if target != "opencode" {
-                anyhow::bail!("unknown target: {target} (only `opencode` supported)");
-            }
-            let path = one_grep::install::install_opencode(http, port)?;
+            let path = one_grep::install::install(&target, http, port)?;
             println!("registered one-grep in {}", path.display());
         }
     }
