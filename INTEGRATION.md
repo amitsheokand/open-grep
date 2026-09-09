@@ -191,7 +191,44 @@ mcp_servers:
 
 ---
 
-## 5. Privacy & Security Constraints
+## 5. Nix / Home Manager (OSS module)
+
+Declarative packaging lives in-tree under `nix/` (import into a consumer
+home-manager / nixos config — do not bake private host paths into the module).
+
+See **`nix/README.md`** for full options and examples.
+
+```nix
+# flake input → overlay + HM module
+imports = [ inputs.one-grep.homeManagerModules.one-grep ];
+nixpkgs.overlays = [ inputs.one-grep.overlays.default ];
+
+programs.one-grep = {
+  enable = true;
+  package = pkgs.one-grep;
+  mcp = {
+    cursor.enable = true;
+    opencode.enable = true;  # stdio local
+    pi.enable = true;
+    muse.enable = true;
+    hermes.enable = true;
+    commandCode.enable = true;
+  };
+};
+```
+
+| Flake output | Role |
+| :--- | :--- |
+| `packages.<system>.one-grep` | rustPlatform package |
+| `overlays.default` | `pkgs.one-grep` |
+| `homeManagerModules.one-grep` | `programs.one-grep.*` |
+
+MCP paths are **options** (defaults match §4 / `one-grep install`). Activation
+upserts only the `one-grep` entry so peer servers remain intact.
+
+---
+
+## 6. Privacy & Security Constraints
 
 - **Local Execution**: All embeddings run locally via FastEmbed ONNX runtime (e.g. `bge-small-en-v1.5` / `minilm`).
 - **No Cloud/China Endpoints**: No external inference or embedding API endpoints are called.
