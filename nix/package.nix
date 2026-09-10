@@ -2,11 +2,19 @@
 # OSS-safe: no private hostnames, product names, or user paths.
 {
   lib,
+  stdenv,
   rustPlatform,
   pkg-config,
   openssl,
   onnxruntime,
+  makeWrapper,
 }:
+
+let
+  ortDylib =
+    if stdenv.hostPlatform.isDarwin then "libonnxruntime.dylib" else "libonnxruntime.so";
+  libPathVar = if stdenv.hostPlatform.isDarwin then "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH";
+in
 
 rustPlatform.buildRustPackage {
   pname = "one-grep";
@@ -33,6 +41,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     rustPlatform.bindgenHook
+    makeWrapper
   ];
 
   buildInputs = [
@@ -41,15 +50,21 @@ rustPlatform.buildRustPackage {
   ];
 
   # Prefer nixpkgs onnxruntime over ort-sys network download (sandbox-safe).
+  # nixpkgs ships a shared library only; without ORT_PREFER_DYNAMIC_LINK,
+  # ort-sys looks for static archives and fails with "could not link".
   # Darwin Security/SystemConfiguration come from the stdenv apple-sdk
   # (do not reference legacy darwin.apple_sdk.frameworks stubs).
   ORT_STRATEGY = "system";
   ORT_LIB_LOCATION = "${onnxruntime}/lib";
+  ORT_PREFER_DYNAMIC_LINK = "1";
 
   # Package check deferred; use `cargo test` / host validation instead.
   doCheck = false;
 
   postInstall = ''
+    wrapProgram $out/bin/one-grep \
+      --prefix ${libPathVar} : ${lib.makeLibraryPath [ onnxruntime ]} \
+      --set-default ORT_DYLIB_PATH ${onnxruntime}/lib/${ortDylib}
     ln -s one-grep $out/bin/open-grep
   '';
 

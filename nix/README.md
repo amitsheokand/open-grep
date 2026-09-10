@@ -79,8 +79,9 @@ HTTP/bearer mode is intentionally out of scope for this module — use the CLI
 
 ## Package build notes
 
-`nix/package.nix` sets `ORT_STRATEGY=system` and links `onnxruntime` from
-nixpkgs so the build does not download ORT binaries inside the sandbox.
+`nix/package.nix` sets `ORT_STRATEGY=system`, `ORT_PREFER_DYNAMIC_LINK=1`,
+and links the shared `onnxruntime` from nixpkgs so the build does not download
+ORT binaries inside the sandbox (and does not look for static archives).
 
 Validate:
 
