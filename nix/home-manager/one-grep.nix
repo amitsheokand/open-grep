@@ -11,6 +11,9 @@
 #
 # All config paths are options (defaults match `one-grep install` targets).
 # No private hostnames, product names, or user home paths are baked in.
+#
+# `checkCommand = true` skips MCP registration when `command` is not installed,
+# so wiring MCP before providing the binary is safe (no dead entries).
 {
   config,
   lib,
@@ -204,6 +207,23 @@ let
     )
   );
 
+  # Guard: no MCP entry for a command that is not installed (dead entries would
+  # surface as connection failures in every client). `command -v` handles both
+  # absolute paths and PATH lookups.
+  guardedActivationBody =
+    if cfg.checkCommand then
+      ''
+        if command -v ${lib.escapeShellArg command} >/dev/null 2>&1; then
+      ''
+      + activationBody
+      + ''
+        else
+          echo "one-grep: ${lib.escapeShellArg command} not found; skipping MCP registration" >&2
+        fi
+      ''
+    else
+      activationBody;
+
   anyMcp =
     cfg.mcp.cursor.enable
     || cfg.mcp.opencode.enable
@@ -243,6 +263,17 @@ in
       description = ''
         Absolute command path written into MCP configs.
         Defaults to `''${package}/bin/one-grep` when package is set, else `"one-grep"` (PATH).
+      '';
+    };
+
+    checkCommand = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        When true, skip MCP registration during activation if the resolved
+        `command` is not found. Hosts that wire MCP before installing the
+        binary then get no dead entries (and a warning), instead of a server
+        that fails to connect.
       '';
     };
 
@@ -312,7 +343,7 @@ in
     home.packages = lib.optional (cfg.installPackage && cfg.package != null) cfg.package;
 
     home.activation.oneGrepMcp = mkIf anyMcp (
-      lib.hm.dag.entryAfter [ "writeBoundary" ] activationBody
+      lib.hm.dag.entryAfter [ "writeBoundary" ] guardedActivationBody
     );
   };
 }

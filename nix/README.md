@@ -25,6 +25,7 @@ programs.one-grep = {
   package = pkgs.one-grep;
   # installPackage = true;   # default: add to home.packages
   # command = null;          # default: "${package}/bin/one-grep"
+  # checkCommand = false;    # skip MCP registration when command is missing
 
   mcp = {
     cursor.enable = true;       # ~/.cursor/mcp.json
@@ -66,6 +67,11 @@ programs.one-grep = {
 
 MCP activation **upserts** only the `one-grep` entry (JSON via `jq`, Hermes YAML
 via a small Python helper) so peer servers in the same file are preserved.
+
+Set `checkCommand = true` when a host wires MCP before the binary is installed:
+activation then checks `command` and skips registration (with a warning) instead
+of writing an entry that fails to connect. Useful when `command` points at a
+per-user path such as `~/.local/bin/one-grep` that not every host has yet.
 
 OpenCode registration is **stdio local** (same as `one-grep install --target opencode`).
 HTTP/bearer mode is intentionally out of scope for this module — use the CLI
