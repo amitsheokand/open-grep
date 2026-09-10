@@ -49,6 +49,10 @@ rustPlatform.buildRustPackage {
   # Package check deferred; use `cargo test` / host validation instead.
   doCheck = false;
 
+  postInstall = ''
+    ln -s one-grep $out/bin/open-grep
+  '';
+
   meta = with lib; {
     description = "Local-first hybrid workspace search (BM25 + ONNX embeddings + MCP)";
     license = licenses.asl20;
